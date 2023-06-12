@@ -1,0 +1,287 @@
+---
+title: "STA 141A Data Pred (Keep)"
+author: "Judah Hsu"
+date: "2023-06-08"
+output: html_document
+---
+
+#INITIALIZE DATA
+```{r}
+#Code to create new dataset, including spikes
+library(tidyverse)
+#Get session
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste(("/Users/judahhsu/Desktop/classes/STA 141A/sessions/session"),i,'.rds',sep=''))
+  #print(session[[i]]$mouse_name)
+  #print(session[[i]]$date_exp)
+}
+
+session1=cbind(session[[1]]$contrast_left,session[[1]]$contrast_right,rep(1,length(session[[1]]$contrast_left)),session[[1]]$mouse_name,length(session[[1]]$brain_area),length(unique(session[[1]]$brain_area)),length(session[[1]]$spks),session[[1]]$feedback_type)
+
+session2=cbind(session[[2]]$contrast_left,session[[2]]$contrast_right,rep(2,length(session[[2]]$contrast_left)),session[[2]]$mouse_name,length(session[[2]]$brain_area),length(unique(session[[2]]$brain_area)),length(session[[2]]$spks),session[[2]]$feedback_type)
+
+#make dataframe for rest of sessions
+df <- (rbind(session1, session2))
+for(i in 3:18){
+  session.temp = cbind(session[[i]]$contrast_left,session[[i]]$contrast_right,rep(i,length(session[[i]]$contrast_left)),session[[i]]$mouse_name,length(session[[i]]$brain_area),length(unique(session[[i]]$brain_area)),length(session[[i]]$spks),session[[i]]$feedback_type)
+  df <- rbind(df, session.temp)
+}
+
+#REMAKE DF
+colnames(df) = c("contrast_left","contrast_right", "session","mouse","number_of_neurons","brain_area","number_of_trials", "feedback_type")
+df = as.data.frame(df)
+df$contrast_left = as.factor(df$contrast_left)
+df$contrast_right = as.factor(df$contrast_right)
+df$session = as.factor (df$session)
+df$mouse = as.factor(df$mouse)
+df$feedback_type = as.factor(df$feedback_type)
+
+#Code to get top five neurons and their brain areas, and to do pca on them... should i do pca stratified by session? nah I don't think so and my reasoning is just because the more i split it up by sessions and stuff, the more complicated it gets
+
+df.neuron <- matrix(ncol=10)
+df.neuron <- data.frame(df.neuron)
+names(df.neuron) <- c('neuron1', 'neuron2', 'neuron3', 'neuron4', 'neuron5', 'ba1', 'ba2', 'ba3', 'ba4', 'ba5')
+
+#for every trial, create 5 columns of the first-5 spikes and brain areas... then PCA for the spikes and add the brain areas to the df
+for (s in 1:length(session)){
+  for(t in 1:length(session[[s]]$feedback_type)){
+    tempSums <- session[[s]]$spks[[t]] %>% rowSums()
+    order <- tempSums %>% order(decreasing=TRUE)
+    temp.ba <- session[[s]]$brain_area[order]
+    row.add <- c(tempSums[order][1:5], temp.ba[1:5])
+    df.neuron <- rbind(df.neuron, row.add)
+  } 
+}
+
+df.neuron <- na.omit(df.neuron)
+df.neuron$neuron1 <- df.neuron$neuron1 %>% as.numeric()
+df.neuron$neuron2 <- df.neuron$neuron2 %>% as.numeric()
+df.neuron$neuron3 <- df.neuron$neuron3 %>% as.numeric()
+df.neuron$neuron4 <- df.neuron$neuron4 %>% as.numeric()
+df.neuron$neuron5 <- df.neuron$neuron5 %>% as.numeric()
+
+pca.neuron <- prcomp(x=df.neuron[1:5], scale=TRUE)
+plot(pca.neuron, type = "l", main = "Scree Plot")
+pc1<-pca.neuron$rotation[,1] %>% matrix(nrow=5, ncol=1)
+df.neuron <- cbind(df.neuron, pc1 = as.matrix(df.neuron[1:5]) %*% pc1)
+df.neuron <- df.neuron[-1:-5]
+
+df <- cbind(df, df.neuron) #Tis because i only did it for one session
+
+#Turn all important categorical variables into factors or change them
+df$ba1 <- as.factor(df$ba1)
+df$ba2 <- as.factor(df$ba2)
+df$ba3 <- as.factor(df$ba3)
+df$ba4 <- as.factor(df$ba4)
+df$ba5 <- as.factor(df$ba5)
+
+```
+
+
+
+
+
+#PREDICTOR TEST train/test ENCODING... to double check how well brain areas work
+```{r}
+rates <- c()
+for(i in 1:50){
+
+  #SPLIT up data
+  len <- nrow(df) # Trials
+  train.indices <- sample(2:len, len %/% 4, replace=FALSE)
+  train.trials <-df[train.indices,]
+  test.trials <- df[-train.indices,]
+  
+  #Select certain columns
+  train.trials <- train.trials %>% select(feedback_type,ba1:ba5)
+  test.trials <- test.trials %>% select(feedback_type,ba1:ba5)
+  
+  
+  #I have train.trials, now let's redo the process for one hot encoding
+  library(caret)
+  library(glmnet)
+  
+  train.encoded <- dummyVars("~.", data=train.trials[-1]) %>% predict(newdata=train.trials[-1]) #Fudge it created 302 variables..... oh 
+  
+  #New dataset with original + encoded categorical variables
+  train.trials <- cbind(train.trials, train.encoded)
+  
+  predictors <- as.matrix(train.trials %>% dplyr::select(ba1.ACA:ba5.ZI))
+  response <- as.matrix(train.trials[1])
+  
+  cv_model <- cv.glmnet(predictors, response, alpha=1, nfolds=10, family='binomial', seed=1)
+  
+  best_lambda <- cv_model$lambda.min
+  
+  lasso_model <- glmnet(predictors, response, alpha=1, lambda=best_lambda)
+  
+  #ENCODE TEST
+  test.encoded <-dummyVars("~.", data=test.trials[-1]) %>% predict(newdata=test.trials[-1])
+  predictions <- ifelse(predict(lasso_model, newx = as.matrix(test.encoded)) > 0.5, -1, 1)
+  
+  confusion_matrix <- table(predictions, test.trials[[1]])
+  misclassification_rate <- 1 - sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  rates<- c(rates, (misclassification_rate))
+}
+
+print(sum(rates)/50)
+```
+
+#TEST WITH SESSION & BRAIN DATA
+```{r}
+rates <- c()
+for(i in 1:50){
+  len <- nrow(df) # Trials
+  train.indices <- sample(2:len, len %/% 4, replace=FALSE)
+  train.trials <-df[train.indices,]
+  test.trials <- df[-train.indices,]
+  
+  #Select certain columns
+  train.trials <- train.trials %>% select(feedback_type, ba1:ba5, session)
+  test.trials <- test.trials %>% select(feedback_type, ba1:ba5, session)
+  
+  
+  #I have train.trials, now let's redo the process for one hot encoding
+  library(caret)
+  library(glmnet)
+  
+  train.encoded <- dummyVars("~.", data=train.trials[-1]) %>% predict(newdata=train.trials[-1]) #Fudge it created 302 variables..... oh 
+  
+  #New dataset with original + encoded categorical variables
+  train.trials <- cbind(train.trials, train.encoded)
+  
+  predictors <- as.matrix(train.trials %>% dplyr::select(ba1.ACA:session.9))
+  response <- as.matrix(train.trials[1])
+  
+  cv_model <- cv.glmnet(predictors, response, alpha=1, nfolds=10, family='binomial', seed=1)
+  
+  best_lambda <- cv_model$lambda.min
+  
+  lasso_model <- glmnet(predictors, response, alpha=1, lambda=best_lambda)
+  
+  #ENCODE TEST
+  test.encoded <-dummyVars("~.", data=test.trials[-1]) %>% predict(newdata=test.trials[-1])
+  predictions <- ifelse(predict(lasso_model, newx = as.matrix(test.encoded)) > 0.5, -1, 1)
+  
+  confusion_matrix <- table(predictions, test.trials[[1]])
+  misclassification_rate <- 1 - sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  rates <- c(rates, misclassification_rate)
+}
+print(sum(rates)/50)
+
+#LOG Regression
+#PROBABLY lasso/elastic net, need to find lambda
+#let's do elastic net. we might have correlated parameters in case there's an interaction
+```
+
+#MODEL CREATION TEST
+```{r}
+library(caret)
+library(glmnet)
+train.data <- df %>% select(feedback_type,ba1:ba5)
+train.encoded <- dummyVars("~.", data=train.data[-1]) %>% predict(newdata=train.data[-1])
+train.new <- cbind(train.data, train.encoded)
+train.new
+
+predictors <- as.matrix(train.new %>% dplyr::select(ba1.ACA:ba5.ZI))
+response <- as.matrix(train.new[1])
+cv_model <- cv.glmnet(predictors, response, alpha=1, nfolds=10, family='binomial', seed=1)
+best_lambda <- cv_model$lambda.min
+lasso_model <- glmnet(predictors, response, alpha=1, lambda=best_lambda)
+
+train.encoded %>% head()
+```
+
+
+
+#OFFICIAL Test data
+```{r}
+library(tidyverse)
+library(caret)
+library(glmnet)
+#Initialize test data frame
+session.test=list()
+for(i in 1:2){
+  session.test[[i]]=readRDS(paste(("/Users/judahhsu/Desktop/classes/STA 141A/test/test"),i,'.rds',sep=''))
+}
+
+test1=cbind(session.test[[1]]$contrast_left,session.test[[1]]$contrast_right,rep(1,length(session.test[[1]]$contrast_left)),session.test[[1]]$mouse_name,length(session.test[[1]]$brain_area),length(unique(session.test[[1]]$brain_area)),length(session.test[[1]]$spks),session.test[[1]]$feedback_type)
+
+test2=cbind(session.test[[2]]$contrast_left,session.test[[2]]$contrast_right,rep(2,length(session.test[[2]]$contrast_left)),session.test[[2]]$mouse_name,length(session.test[[2]]$brain_area),length(unique(session.test[[2]]$brain_area)),length(session.test[[2]]$spks),session.test[[2]]$feedback_type)
+
+#make dataframe for rest of sessions
+df.test <- (rbind(test1, test2))
+colnames(df.test) = c("contrast_left","contrast_right", "session","mouse","number_of_neurons","brain_area","number_of_trials", "feedback_type")
+df.test = as.data.frame(df.test)
+df.test$contrast_left = as.factor(df.test$contrast_left)
+df.test$contrast_right = as.factor(df.test$contrast_right)
+df.test$session = as.factor (df.test$session)
+df.test$mouse = as.factor(df.test$mouse)
+df.test$feedback_type = as.factor(df.test$feedback_type)
+
+df.neuron <- matrix(ncol=10)
+df.neuron <- data.frame(df.neuron)
+names(df.neuron) <- c('neuron1', 'neuron2', 'neuron3', 'neuron4', 'neuron5', 'ba1', 'ba2', 'ba3', 'ba4', 'ba5')
+for (s in 1:length(session.test)){
+  for(t in 1:length(session.test[[s]]$feedback_type)){
+    tempSums <- session.test[[s]]$spks[[t]] %>% rowSums()
+    order <- tempSums %>% order(decreasing=TRUE)
+    temp.ba <- session.test[[s]]$brain_area[order]
+    row.add <- c(tempSums[order][1:5], temp.ba[1:5])
+    df.neuron <- rbind(df.neuron, row.add)
+  } 
+}
+df.neuron <- na.omit(df.neuron)
+df.neuron$neuron1 <- df.neuron$neuron1 %>% as.numeric()
+df.neuron$neuron2 <- df.neuron$neuron2 %>% as.numeric()
+df.neuron$neuron3 <- df.neuron$neuron3 %>% as.numeric()
+df.neuron$neuron4 <- df.neuron$neuron4 %>% as.numeric()
+df.neuron$neuron5 <- df.neuron$neuron5 %>% as.numeric()
+pca.neuron <- prcomp(x=df.neuron[1:5], scale=TRUE)
+#plot(pca.neuron, type = "l", main = "Scree Plot")
+pc1<-pca.neuron$rotation[,1] %>% matrix(nrow=5, ncol=1)
+df.neuron <- cbind(df.neuron, pc1 = as.matrix(df.neuron[1:5]) %*% pc1)
+df.neuron <- df.neuron[-1:-5]
+df.test <- cbind(df.test, df.neuron) 
+
+df.test$ba1 <- as.factor(df.test$ba1)
+df.test$ba2 <- as.factor(df.test$ba2)
+df.test$ba3 <- as.factor(df.test$ba3)
+df.test$ba4 <- as.factor(df.test$ba4)
+df.test$ba5 <- as.factor(df.test$ba5)
+
+#PREPROCESS
+test <- df.test %>% select(feedback_type, ba1:ba5) #Not using session
+test.encoded <-dummyVars("~.", data=test[-1]) %>% predict(newdata=test[-1])
+
+#Note that I had to change the training model
+
+
+#AVERAGE
+ave.rates <- c()
+for(i in 1:50){
+  #CREATE TRAIN MODEL
+  train.data <- df %>% select(feedback_type,ba1:ba5)
+  train.encoded <- dummyVars("~.", data=train.data[-1]) %>% predict(newdata=train.data[-1])
+  test_colnames <- colnames(test.encoded)
+  train.encoded <- train.encoded[, colnames(train.encoded) %in% test_colnames]
+  
+  train.new <- cbind(train.data, train.encoded)
+  
+  predictors <- as.matrix(train.new %>% dplyr::select(ba1.ACA:ba5.ZI))
+  response <- as.matrix(train.new[1])
+  cv_model <- cv.glmnet(predictors, response, alpha=1, nfolds=10, family='binomial', seed=1)
+  best_lambda <- cv_model$lambda.min
+  lasso_model <- glmnet(predictors, response, alpha=1, lambda=best_lambda)
+  
+  
+  predictions <- ifelse(predict(lasso_model, newx = as.matrix(test.encoded)) > 0.5, 1, -1) #DO i have to explain why it'd be -1 if >0.5
+  confusion_matrix <- table(predictions, test[[1]])
+  misclassification_rate <- 1 - sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  ave.rates <- c(ave.rates, (misclassification_rate))
+}
+print(sum(ave.rates)/50)
+
+#0.4112~average (without set seed)
+```
