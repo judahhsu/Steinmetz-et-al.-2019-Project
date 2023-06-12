@@ -1,0 +1,374 @@
+---
+title: "STA 141A Data Integration (Keep)"
+author: "Judah Hsu"
+date: "2023-06-08"
+output: html_document
+---
+## Section 3: Data Integration
+
+### Clustering
+
+In order to perform the data integration, I'll first look at clusters
+and then PCA. In particular, in order to integrate the "spks" value for
+each trial, I've decided to add a column for significant brain areas and
+for each column, I'll add the average number of spikes for that brain
+area in a given trial. I've chosen average vs. aggregate or proportion
+because both the proportion of "spks" and its aggregate are dependent on
+the amount of neurons recorded for that brain area.
+
+From there, I'll cluster the points for every possible pair of brain
+areas, highlight the trials by color (success/failure), and see which
+metric seems to cluster the trials most accurately. Additionally, I'll
+be trying different metrics as well as clustering methods.
+
+First, however, there are 62 unique brain areas. Instead of adding 62
+unique brain areas, I went through each session and found the proportion
+of spikes each brain area accounts for. Then, I'll first remove brain
+areas that appear in only one or two sessions since any trial without
+that brain area recorded will have "NA" in it's place, making it hard to
+cluster based on that brain area. Next, I'll take only the brain areas
+that appear in 6+ sessions so that I'll be able to use said-brain areas
+as metrics that work for a variety of trials. By this method, I'm left
+with 7 brain areas that appear in 6+ sessions (CA1, CA3, DG, LGd, MOs,
+VISp, and root)
+
+```{r}
+#CODE TO DETERMINE SIGNIFICANT BRAIN AREAS---------------------------------------------------------------------
+
+#Find all brain areas
+brains.all <- c()
+for(i in 1:18){
+  brains.all<-c(brains.all, session[[i]]$brain_area)
+}
+brains.unique <- brains.all %>% unique()
+
+spks.total <- 0
+#get total number of spikes in session 1
+for (s in 1:length(session[[1]]$spks)){
+  spks.total <- spks.total +sum(session[[1]]$spks[[s]])
+}
+
+#Get total number of spikes for each brain area in session 1, across neurons and trials
+session1.unique <- session[[1]]$brain_area %>% unique()
+session1.brain.props <- c()
+for(i in 1:length(session1.unique)) {
+  #Go through each brain area in session 1
+  temp.total <- 0
+  for(j in 1:length(session[[1]]$spks)){
+    #Now for each brain area, go through each trial
+    for(k in 1:length(session[[1]]$spks[[j]][,1])){
+     #Now go through each neuron in trial and add the sum of the spks vector if the neuron brain area is equal to current brain raea
+      #Then add that to the temp total
+      if(session[[1]]$brain_area[j] == session1.unique[i]){
+        temp.total <- temp.total + sum(session[[1]]$spks[[j]][k,])
+      }
+    }
+  }
+  session1.brain.props <- c(session1.brain.props, temp.total/spks.total)
+  #now that you have temp total, add it to the proportion vector
+}
+df.brain.utility <- data.frame("brain areas" = session1.unique, props = session1.brain.props, "session number" = rep(1, length(session1.unique)))
+
+for(s in 2:length(session)){
+  session.unique <- session[[s]]$brain_area %>% unique()
+  session.brain.props <- c()
+  for(i in 1:length(session.unique)){
+    temp.total <- 0
+    for(j in 1:length(session[[s]]$spks)){
+      for(k in 1:length(session[[s]]$spks[[j]][,1])){
+        if(session[[s]]$brain_area[j] == session.unique[i]){
+          temp.total <- temp.total + sum(session[[s]]$spks[[j]][k,])
+        }
+      }
+    }
+    session.brain.props <- c(session.brain.props, temp.total/spks.total)
+  }
+  #add info to df.brain.utility in the form of a row
+  for(p in 1:length(session.brain.props)){
+    df.brain.utility <- df.brain.utility %>% rbind(c(session.unique[p], session.brain.props[p], s))
+  }
+}
+
+df.brain.utility <- df.brain.utility %>% arrange(brain.areas)
+#Brain areas to take out: (* means it has 2 recordings)
+#ACB, AUD, BLA, EPd, *GPe, ILA, LHm *LP, LS, LSc, MD, MEA, MG, MOp, MS, NB, OLF, ORB*, ORBm, OT, PAG, PIR, PO, POL, PT, RN, RSP, RT, SCs*, SCsg, SI, SNr, SPF, SSs, TT*, VISpm, VISrl, VPM*
+
+#The ones that have a lot (6+ about a third of the sessions record them) are: #it's okay if props =0 bc that means SMTH was recorded
+  #CA1 (2,3,4,5,6,8,9,10,12,13,14)
+  #CA3 (1,7,8,9,15,16,18)
+  #DG (1, 3, 4, 5, 8, 10, 12, 13)
+  #LGd (4, 12, 13, 15, 16, 18)
+  #MOs (1, 4, 5, 8, 12, 13, 14)
+  #VISp (1, 3, 4, 8, 10, 12, 14)
+  #root (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18)
+#CODE TO DETERMINE SIGNIFICANT BRAIN AREAS---------------------------------------------------------------------
+#For clustering based on average brain areas
+```
+
+
+
+
+
+
+
+#Initializing df
+
+```{r}
+#Code to create new dataset, including spikes
+library(tidyverse)
+#Get session
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste(("/Users/judahhsu/Desktop/classes/STA 141A/sessions/session"),i,'.rds',sep=''))
+  #print(session[[i]]$mouse_name)
+  #print(session[[i]]$date_exp)
+}
+
+session1=cbind(session[[1]]$contrast_left,session[[1]]$contrast_right,rep(1,length(session[[1]]$contrast_left)),session[[1]]$mouse_name,length(session[[1]]$brain_area),length(unique(session[[1]]$brain_area)),length(session[[1]]$spks),session[[1]]$feedback_type)
+
+session2=cbind(session[[2]]$contrast_left,session[[2]]$contrast_right,rep(2,length(session[[2]]$contrast_left)),session[[2]]$mouse_name,length(session[[2]]$brain_area),length(unique(session[[2]]$brain_area)),length(session[[2]]$spks),session[[2]]$feedback_type)
+
+#make dataframe for rest of sessions
+df <- (rbind(session1, session2))
+for(i in 3:18){
+  session.temp = cbind(session[[i]]$contrast_left,session[[i]]$contrast_right,rep(i,length(session[[i]]$contrast_left)),session[[i]]$mouse_name,length(session[[i]]$brain_area),length(unique(session[[i]]$brain_area)),length(session[[i]]$spks),session[[i]]$feedback_type)
+  df <- rbind(df, session.temp)
+}
+
+#REMAKE DF
+colnames(df) = c("contrast_left","contrast_right", "session","mouse","number_of_neurons","brain_area","number_of_trials", "feedback_type")
+df = as.data.frame(df)
+df$contrast_left = as.factor(df$contrast_left)
+df$contrast_right = as.factor(df$contrast_right)
+df$session = as.factor (df$session)
+df$mouse = as.factor(df$mouse)
+df$feedback_type = as.factor(df$feedback_type)
+
+###ADD COLUMNS for each brain area -> Again, for average spikes per brain area
+brain_column_prop <- function(area){
+  props.temp <- c() 
+  for(s in 1:length(session)){
+    if(area %in% session[[s]]$brain_area){
+      #If there's an actual record of CA1 in it
+      for(tr in 1:length(session[[s]]$spks)){#For each trial
+        #get total spikes in trial
+        trial.spks <- sum(session[[s]]$spks[[tr]])
+        brain.spks <- 0
+        for(n in 1:length(session[[s]]$spks[[tr]][,1])){ #For every neuron
+          if(session[[s]]$brain_area[[n]] == area){
+            brain.spks <- brain.spks + sum(session[[s]]$spks[[tr]][n,])
+          }
+        }
+        props.temp <- c(props.temp, brain.spks/trial.spks)
+      }
+    }
+    else {
+      #Otherwise, you just add NA for as many neuronsxtrials
+      props.temp <- c(props.temp, rep(NA, length(session[[s]]$spks)))
+    }
+  }
+  return(props.temp)
+}
+
+brain_column_ave <- function(area){
+  aves.temp <- c() 
+  for(s in 1:length(session)){
+    if(area %in% session[[s]]$brain_area){
+      #If there's an actual record of CA1 in it
+      for(tr in 1:length(session[[s]]$spks)){#For each trial
+        #get total spikes in trial
+        brain.total <- sum(session[[s]]$brain_area == area) #instead find the number of neurons #that have that brain area
+        brain.spks <- 0
+        for(n in 1:length(session[[s]]$spks[[tr]][,1])){ #For every neuron
+          if(session[[s]]$brain_area[[n]] == area){
+            brain.spks <- brain.spks + sum(session[[s]]$spks[[tr]][n,])
+          }
+        }
+        aves.temp <- c(aves.temp, brain.spks/brain.total)
+      }
+    }
+    else {
+      #Otherwise, you just add NA for as many neuronsxtrials
+      aves.temp <- c(aves.temp, rep(NA, length(session[[s]]$spks)))
+    }
+  }
+  return(aves.temp)
+}
+
+
+brain.add <- c('CA1', 'CA3', 'DG', 'LGd', 'MOs', 'VISp', 'root') #brain areas to be added as columns
+add_props <- function(data){
+  data <- cbind(data, 'CA1' = brain_column_prop("CA1"))
+  data <- cbind(data, 'CA3' = brain_column_prop("CA3"))
+  data <- cbind(data, 'DG' = brain_column_prop("DG"))
+  data <- cbind(data, 'LGd' = brain_column_prop("LGd"))
+  data <- cbind(data, 'MOs' = brain_column_prop("MOs"))
+  data <- cbind(data, 'VISp' = brain_column_prop("VISp"))
+  data <- cbind(data, 'root' = brain_column_prop("root")) 
+  return(data)
+}
+
+add_aves <- function(data) {
+  data <- cbind(data, 'CA1' = brain_column_ave("CA1"))
+  data <- cbind(data, 'CA3' = brain_column_ave("CA3"))
+  data <- cbind(data, 'DG' = brain_column_ave("DG"))
+  data <- cbind(data, 'LGd' = brain_column_ave("LGd"))
+  data <- cbind(data, 'MOs' = brain_column_ave("MOs"))
+  data <- cbind(data, 'VISp' = brain_column_ave("VISp"))
+  data <- cbind(data, 'root' = brain_column_ave("root")) 
+  return(data)
+}
+
+#df <- add_aves(df)
+```
+
+#Plot based on average brain area across pairwise brain areas, color coded by feedback
+```{r}
+
+library(GGally)
+#ggpairs(df[,9:ncol(df)], mapping = ggplot2::aes(colour = df$feedback_type, alpha=0.1))
+####PLOT ONLY WORKS WITH THE AVERAGE BRAIN AREAS
+```
+
+
+
+#Code to add pc1 for top 5 neurons
+```{r}
+#Code to get top five neurons and their brain areas, and to do pca on them... should i do pca stratified by session? nah I don't think so and my reasoning is just because the more i split it up by sessions and stuff, the more complicated it gets
+
+df.neuron <- matrix(ncol=10)
+df.neuron <- data.frame(df.neuron)
+names(df.neuron) <- c('neuron1', 'neuron2', 'neuron3', 'neuron4', 'neuron5', 'ba1', 'ba2', 'ba3', 'ba4', 'ba5')
+
+#for every trial, create 5 columns of the first-5 spikes and brain areas... then PCA for the spikes and add the brain areas to the df
+for (s in 1:length(session)){
+  for(t in 1:length(session[[s]]$feedback_type)){
+    tempSums <- session[[s]]$spks[[t]] %>% rowSums()
+    order <- tempSums %>% order(decreasing=TRUE)
+    temp.ba <- session[[s]]$brain_area[order]
+    row.add <- c(tempSums[order][1:5], temp.ba[1:5])
+    df.neuron <- rbind(df.neuron, row.add)
+  } 
+}
+
+df.neuron <- na.omit(df.neuron)
+df.neuron$neuron1 <- df.neuron$neuron1 %>% as.numeric()
+df.neuron$neuron2 <- df.neuron$neuron2 %>% as.numeric()
+df.neuron$neuron3 <- df.neuron$neuron3 %>% as.numeric()
+df.neuron$neuron4 <- df.neuron$neuron4 %>% as.numeric()
+df.neuron$neuron5 <- df.neuron$neuron5 %>% as.numeric()
+
+pca.neuron <- prcomp(x=df.neuron[1:5], scale=TRUE)
+plot(pca.neuron, type = "l", main = "Scree Plot")
+pc1<-pca.neuron$rotation[,1] %>% matrix(nrow=5, ncol=1)
+df.neuron <- cbind(df.neuron, pc1 = as.matrix(df.neuron[1:5]) %*% pc1)
+df.neuron <- df.neuron[-1:-5]
+
+df <- cbind(df, df.neuron) #Tis because i only did it for one session
+
+#Turn all important categorical variables into factors or change them
+df$ba1 <- as.factor(df$ba1)
+df$ba2 <- as.factor(df$ba2)
+df$ba3 <- as.factor(df$ba3)
+df$ba4 <- as.factor(df$ba4)
+df$ba5 <- as.factor(df$ba5)
+
+#ggsave("fig_3.1.png",dpi = 300)
+```
+
+
+
+
+#Clustering
+#Hot one encoding for session, brain area, contrast, pc1 & kmeans prediction
+```{r}
+library(caret)
+
+#Encoded cat variales only
+df.cat <- df %>% select(ba1:ba5, session)
+encoded <- dummyVars("~.", data=df.cat) %>% predict(newdata=df.cat) #Fudge it created 302 variables..... oh 
+  
+#New dataset with original + encoded categorical variables
+df.new <- cbind(df, encoded)
+
+#One concern is how to label, do you arbitrarily label them? And I think yes. Because the purpose of this clustering is not to  predict the data itself but firstly to see the relation
+ 
+kMeansMisclass <- function(selectdf){
+  kmeans.cluster <- selectdf %>% kmeans(centers=2)
+
+  #CONFUSION MATRIX
+  cluster.names <- c("-1", "1")
+  df.new$cluster <- cluster.names[kmeans.cluster$cluster] #GLOBAL VARIABLE
+
+  #comparison <- table(df.new$feedback_type, df.new$cluster) #GLOBAL VARIABLE
+  #print(comparison)
+
+  #ALTERNATE CONFUSION MATRIX
+  df.new$cluster <- as.factor(df.new$cluster) #GLOBAL VARIABLE
+
+  # Create a confusion matrix
+  confusion_matrix <- confusionMatrix(data = df.new$cluster, reference = df.new$feedback_type)
+
+
+  #print(confusion_matrix)
+  rate.class <- confusion_matrix$overall["Accuracy"]
+  return(rate.class)
+}
+
+df.new %>% head()
+
+#Get the average rate over many times
+avg.class.rate <- function(selectdf){
+  avg.accuracy <- c()
+  for(i in 1:50){
+    accuracy <- kMeansMisclass(selectdf)
+    vals <- c(accuracy, 1-accuracy)
+    avg.accuracy <- c(avg.accuracy, min(vals)) #So I'm printing the lower values. now I need to add and average them
+  }
+  return(sum(avg.accuracy)/50)
+}
+
+#One hot encoding for contrast, session, brain area, PC1
+check <- df.new %>% select(contrast_left, contrast_right, pc1:session.9)
+print(avg.class.rate(check)) #0.453454/0.546546
+
+#One hot encoding for contrast, session, brain area... X PC1
+check <- df.new %>% select(contrast_left, contrast_right, ba1.ACA:session.9)
+print(avg.class.rate(check)) #0.3607006/0.6392994, assuming 2 clusters are dif by nature
+
+#One hot encoding for contrast,, brain area, PC1... X Session
+check <- df.new %>% select(contrast_left, contrast_right, pc1:ba5.ZI)
+print(avg.class.rate(check)) #0.453454/0.546546 Taking out session literally does nothing...?
+
+#One hot encoding for contrast, brain area... X PC1, Session So it does seem like PC1 and session don't make a difference
+check <- df.new %>% dplyr::select(contrast_left, contrast_right, ba1.ACA:ba5.ZI)
+print(avg.class.rate(check)) #0.3704428/0.546546
+
+#One hot encoding for contrast, PC1, session X Brain area
+check <- df.new %>% dplyr::select(contrast_left, contrast_right, pc1, session.1:session.9)
+print(avg.class.rate(check)) #0.453454/0.546546
+
+#One hot encoding for brain area
+check <- df.new %>% dplyr::select(ba1.ACA:ba5.ZI)
+print(avg.class.rate(check)) #0.3589569/0.6410431
+
+#One hot encoding for contrast
+check <- df.new %>% dplyr::select(contrast_left, contrast_right)
+print(avg.class.rate(check)) #0.4376028/0.5623972
+
+#One hot encoding for pc1
+check <- df.new %>% dplyr::select(pc1)
+print(avg.class.rate(check)) #0.453454/0.546546
+
+#One hot encoding for session
+check <- df.new %>% dplyr::select(session.1:session.9)
+print(avg.class.rate(check)) #0.3142728/0.6857272
+
+#One hot encoding for session & brain area
+check <- df.new %>% dplyr::select(ba1.ACA:session.9)
+print(avg.class.rate(check)) #0.3489431/0.6510569
+
+
+
+#It appears as though brain area and session # are the best
+```
